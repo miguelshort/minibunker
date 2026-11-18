@@ -1,0 +1,164 @@
+# MIBUNKER — compila la app automáticamente en GitHub
+# Cada vez que subes cambios a la rama "main":
+#   1. Empaqueta la app web en MIBUNKER.zip
+#   2. Publica la app en GitHub Pages (enlace para abrirla desde cualquier navegador)
+#   3. Genera la app de Android (MIBUNKER.apk)
+# Si creas una etiqueta que empiece por "v" (por ejemplo v1.0), además crea
+# una "Release" con el .zip y el .apk listos para descargar.
+#
+# Estructura esperada del repositorio (el contenido de la carpeta MIBUNKER):
+#   index.html
+#   favicon.ico
+#   icono/icono-1024.png  (y el resto de iconos)
+#   LEEME.txt
+
+name: Build MIBUNKER
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: mibunker-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  web:
+    name: App web (.zip + GitHub Pages)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar el código
+        uses: actions/checkout@v4
+
+      - name: Comprobar que la app está completa
+        run: |
+          test -f index.html || { echo "Falta index.html en la raíz del repositorio"; exit 1; }
+          grep -q "MIBUNKER" index.html
+
+      - name: Preparar la carpeta de la app
+        run: |
+          mkdir -p dist/MIBUNKER
+          cp index.html dist/MIBUNKER/
+          [ -f favicon.ico ] && cp favicon.ico dist/MIBUNKER/ || true
+          [ -f LEEME.txt ] && cp LEEME.txt dist/MIBUNKER/ || true
+          [ -d icono ] && cp -r icono dist/MIBUNKER/ || true
+
+      - name: Crear MIBUNKER.zip
+        run: cd dist && zip -r ../MIBUNKER.zip MIBUNKER
+
+      - name: Guardar el .zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: MIBUNKER-web
+          path: MIBUNKER.zip
+
+      - name: Configurar GitHub Pages
+        if: github.ref == 'refs/heads/main'
+        uses: actions/configure-pages@v5
+
+      - name: Subir la web a GitHub Pages
+        if: github.ref == 'refs/heads/main'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist/MIBUNKER
+
+  pages:
+    name: Publicar en GitHub Pages
+    if: github.ref == 'refs/heads/main'
+    needs: web
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Publicar
+        id: deploy
+        uses: actions/deploy-pages@v4
+
+  android:
+    name: App Android (.apk)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar el código
+        uses: actions/checkout@v4
+
+      - name: Instalar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Instalar Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Preparar la app web dentro del proyecto Android
+        run: |
+          mkdir -p www
+          cp index.html www/
+          [ -f favicon.ico ] && cp favicon.ico www/ || true
+          [ -d icono ] && cp -r icono www/ || true
+
+      - name: Crear el proyecto Android con Capacitor
+        run: |
+          npm init -y
+          npm install @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6
+          npx cap init MIBUNKER com.mibunker.app --web-dir www
+          npx cap add android
+
+      - name: Poner el icono de MIBUNKER
+        run: |
+          if [ -f icono/icono-1024.png ]; then
+            mkdir -p assets
+            cp icono/icono-1024.png assets/icon-only.png
+            cp icono/icono-1024.png assets/icon-foreground.png
+            cp icono/icono-1024.png assets/splash.png
+            cp icono/icono-1024.png assets/splash-dark.png
+            npx --yes @capacitor/assets generate --android --iconBackgroundColor '#0b1220' --splashBackgroundColor '#0b1220' || echo "No se pudo generar el icono, se usa el de serie"
+          fi
+
+      - name: Sincronizar y compilar el .apk
+        run: |
+          npx cap sync android
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+          cp app/build/outputs/apk/debug/app-debug.apk ../MIBUNKER.apk
+
+      - name: Guardar el .apk
+        uses: actions/upload-artifact@v4
+        with:
+          name: MIBUNKER-android
+          path: MIBUNKER.apk
+
+  release:
+    name: Crear Release para descargar
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [web, android]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Recoger los archivos compilados
+        uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+
+      - name: Publicar la Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: MIBUNKER ${{ github.ref_name }}
+          body: |
+            **MIBUNKER ${{ github.ref_name }}**
+            - `MIBUNKER.zip`: descomprime y abre `index.html` en tu navegador.
+            - `MIBUNKER.apk`: instálala en tu móvil Android (permite «instalar apps de origen desconocido»).
+          files: |
+            out/MIBUNKER.zip
+            out/MIBUNKER.apk
